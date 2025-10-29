@@ -1,7 +1,17 @@
-function isAllowedHost(h: string) {
-  return (
-    h === "nitter.net" || h.endsWith(".nitter.net") || h === "pbs.twimg.com"
-  );
+// api/twitter.ts
+function normalizeBase(input?: string): string {
+  if (!input) return "";
+  let s = input.trim();
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  return s.replace(/\/+$/, "");
+}
+
+function hostnameOf(u: string): string {
+  try {
+    return new URL(u).hostname;
+  } catch {
+    return "";
+  }
 }
 
 export default async function handler(req: any, res: any) {
@@ -11,16 +21,30 @@ export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  const { username, url } = req.query || {};
+  // База инстанса: env или ?base=...
+  const envBase = normalizeBase(
+    process.env.NITTER_BASE || "https://nitter.net"
+  );
+  const base = normalizeBase(
+    typeof req.query.base === "string" ? req.query.base : envBase
+  );
+  const baseHost = hostnameOf(base);
+
+  // Разрешённые хосты для прямого url
+  const allowedHosts = new Set<string>([baseHost, "pbs.twimg.com"]);
+
+  const { username, url, debug } = req.query || {};
   let target = "";
 
-  if (typeof username === "string" && username) {
-    target = `https://nitter.net/${encodeURIComponent(username)}`;
-  } else if (typeof url === "string" && url) {
+  if (typeof username === "string" && username.trim()) {
+    target = `${base}/${encodeURIComponent(username.trim())}`;
+  } else if (typeof url === "string" && url.trim()) {
     try {
       const u = new URL(url);
-      if (!isAllowedHost(u.hostname)) {
-        return res.status(400).json({ ok: false, error: "host not allowed" });
+      if (!allowedHosts.has(u.hostname)) {
+        return res
+          .status(400)
+          .json({ ok: false, error: `host not allowed: ${u.hostname}` });
       }
       target = u.toString();
     } catch {
@@ -39,25 +63,37 @@ export default async function handler(req: any, res: any) {
     const r = await fetch(target, {
       method: "GET",
       headers: {
-        // близко к твоему примеру
+        // Достаточный набор для HTML
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141 Safari/537.36",
-        "upgrade-insecure-requests": "1",
-        "sec-fetch-user": "?1",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-dest": "document",
         accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "upgrade-insecure-requests": "1",
       },
       redirect: "follow",
       signal: controller.signal,
     });
 
     const ct = r.headers.get("content-type") || "";
-    //@ts-ignore
     const buf = Buffer.from(await r.arrayBuffer());
+
+    if (debug === "1") {
+      // Отдадим диагностический JSON вместо HTML
+      const headers: Record<string, string> = {};
+      r.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      return res.status(200).json({
+        ok: r.ok,
+        status: r.status,
+        contentType: ct,
+        target,
+        base,
+        headers,
+        snippet: buf.toString("utf8").slice(0, 500),
+      });
+    }
 
     res.status(r.status);
     res.setHeader("content-type", ct || "text/html; charset=utf-8");
