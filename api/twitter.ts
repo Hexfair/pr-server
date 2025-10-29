@@ -2,11 +2,6 @@
 // Важно: в этом репо установи @types/node и в tsconfig добавь "types": ["node"]
 // Или в этом файле добавь: import { Buffer } from 'node:buffer';
 
-export const config = {
-  runtime: "nodejs",
-  regions: ["fra1", "cdg1", "arn1"],
-};
-
 function normalizeBase(input?: string): string {
   if (!input) return "";
   let s = input.trim();
