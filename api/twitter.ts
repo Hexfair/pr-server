@@ -3,7 +3,7 @@
 // Или в этом файле добавь: import { Buffer } from 'node:buffer';
 
 export const config = {
-  runtime: "nodejs20.x",
+  runtime: "nodejs",
   regions: ["fra1", "cdg1", "arn1"],
 };
 
