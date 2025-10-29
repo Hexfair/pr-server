@@ -1,11 +1,15 @@
 // api/twitter.ts
+// Важно: в этом репо установи @types/node и в tsconfig добавь "types": ["node"]
+// Или в этом файле добавь: import { Buffer } from 'node:buffer';
+
+export const config = { runtime: "nodejs20.x" };
+
 function normalizeBase(input?: string): string {
   if (!input) return "";
   let s = input.trim();
   if (!/^https?:\/\//i.test(s)) s = "https://" + s;
   return s.replace(/\/+$/, "");
 }
-
 function hostnameOf(u: string): string {
   try {
     return new URL(u).hostname;
@@ -13,94 +17,181 @@ function hostnameOf(u: string): string {
     return "";
   }
 }
+function isVerificationPage(html: string): boolean {
+  const t = html.toLowerCase();
+  return (
+    t.includes("verifying your browser") ||
+    t.includes("ddos") ||
+    t.includes("captcha")
+  );
+}
+function parseBases(queryBase?: string): string[] {
+  // Порядок приоритета:
+  // 1) ?base=a,b,c (через запятую)
+  // 2) env NITTER_BASES="a,b,c"
+  // 3) env NITTER_BASE (один)
+  // 4) дефолтный список
+  const fromQuery = (queryBase || "")
+    .split(",")
+    .map(normalizeBase)
+    .filter(Boolean);
+  if (fromQuery.length) return fromQuery;
+
+  const envList = (process.env.NITTER_BASES || "")
+    .split(",")
+    .map(normalizeBase)
+    .filter(Boolean);
+  if (envList.length) return envList;
+
+  const single = normalizeBase(process.env.NITTER_BASE || "");
+  if (single) return [single];
+
+  // дефолтные фолбэки (можешь подправить)
+  return [
+    "https://nitter.lacontrevoie.fr",
+    "https://nitter.rawbit.ch",
+    "https://nitter.uni-sonia.com",
+    "https://nitter.net",
+    "https://nitter.poast.org",
+  ];
+}
 
 export default async function handler(req: any, res: any) {
-  // CORS
+  // CORS + запрет кэширования
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  // База инстанса: env или ?base=...
-  const envBase = normalizeBase(
-    process.env.NITTER_BASE || "https://nitter.net"
-  );
-  const base = normalizeBase(
-    typeof req.query.base === "string" ? req.query.base : envBase
-  );
-  const baseHost = hostnameOf(base);
-
-  // Разрешённые хосты для прямого url
-  const allowedHosts = new Set<string>([baseHost, "pbs.twimg.com"]);
-
   const { username, url, debug } = req.query || {};
-  let target = "";
+  const attempts: any[] = [];
 
-  if (typeof username === "string" && username.trim()) {
-    target = `${base}/${encodeURIComponent(username.trim())}`;
-  } else if (typeof url === "string" && url.trim()) {
+  // Если передан url — разрешаем только pbs.twimg.com (картинки)
+  if (typeof url === "string" && url.trim()) {
     try {
       const u = new URL(url);
-      if (!allowedHosts.has(u.hostname)) {
+      if (u.hostname !== "pbs.twimg.com") {
         return res
           .status(400)
           .json({ ok: false, error: `host not allowed: ${u.hostname}` });
       }
-      target = u.toString();
+      // Проксируем бинарь
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const r = await fetch(u.toString(), {
+          method: "GET",
+          headers: {
+            "user-agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141 Safari/537.36",
+          },
+          signal: controller.signal,
+        });
+        const ct = r.headers.get("content-type") || "application/octet-stream";
+        const buf = Buffer.from(await r.arrayBuffer());
+        res.status(r.status);
+        res.setHeader("content-type", ct);
+        return res.send(buf);
+      } catch (e: any) {
+        return res
+          .status(502)
+          .json({ ok: false, error: e?.message || "fetch failed" });
+      } finally {
+        clearTimeout(timeout);
+      }
     } catch {
       return res.status(400).json({ ok: false, error: "invalid url" });
     }
-  } else {
+  }
+
+  // Иначе работаем в режиме username через список инстансов
+  if (!(typeof username === "string" && username.trim())) {
     return res
       .status(400)
       .json({ ok: false, error: "username or url is required" });
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const bases = parseBases(
+    typeof req.query.base === "string" ? req.query.base : undefined
+  );
 
-  try {
-    const r = await fetch(target, {
-      method: "GET",
-      headers: {
-        // Достаточный набор для HTML
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141 Safari/537.36",
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "upgrade-insecure-requests": "1",
-      },
-      redirect: "follow",
-      signal: controller.signal,
-    });
+  for (const base of bases) {
+    const target = `${base}/${encodeURIComponent(username.trim())}`;
 
-    const ct = r.headers.get("content-type") || "";
-    const buf = Buffer.from(await r.arrayBuffer());
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
 
-    if (debug === "1") {
-      // Отдадим диагностический JSON вместо HTML
-      const headers: Record<string, string> = {};
-      r.headers.forEach((v, k) => {
-        headers[k] = v;
+    try {
+      const r = await fetch(target, {
+        method: "GET",
+        headers: {
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141 Safari/537.36",
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "upgrade-insecure-requests": "1",
+        },
+        redirect: "follow",
+        signal: controller.signal,
       });
-      return res.status(200).json({
-        ok: r.ok,
+
+      const ct = r.headers.get("content-type") || "";
+      const buf = Buffer.from(await r.arrayBuffer());
+      const snippet = buf.toString("utf8", 0, Math.min(600, buf.length));
+
+      attempts.push({
+        base,
         status: r.status,
         contentType: ct,
-        target,
-        base,
-        headers,
-        snippet: buf.toString("utf8").slice(0, 500),
+        snippet: snippet.slice(0, 200),
       });
-    }
 
-    res.status(r.status);
-    res.setHeader("content-type", ct || "text/html; charset=utf-8");
-    res.send(buf);
-  } catch (e: any) {
-    res.status(502).json({ ok: false, error: e?.message || "fetch failed" });
-  } finally {
-    clearTimeout(timeout);
+      // Успех: 200 и HTML, не «verifying»
+      if (r.ok && ct.includes("text/html") && !isVerificationPage(snippet)) {
+        if (debug === "1") {
+          return res
+            .status(200)
+            .json({
+              ok: true,
+              base,
+              status: r.status,
+              contentType: ct,
+              target,
+              snippet: snippet.slice(0, 500),
+            });
+        }
+        res.status(r.status);
+        res.setHeader("content-type", ct);
+        return res.send(buf);
+      }
+
+      // Если «verifying browser» или 403/429/503 — пробуем следующий базовый
+      if (
+        r.status === 403 ||
+        r.status === 429 ||
+        r.status === 503 ||
+        isVerificationPage(snippet)
+      ) {
+        continue;
+      }
+
+      // Любая другая ошибка — пробуем дальше
+      continue;
+    } catch (e: any) {
+      attempts.push({ base, error: e?.message || "fetch error" });
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  // Если все инстансы провалились
+  if (debug === "1") {
+    return res
+      .status(502)
+      .json({ ok: false, error: "all bases failed", attempts });
+  }
+  return res.status(502).json({ ok: false, error: "fetch failed" });
 }
