@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "api/**/*.ts": {
+      "runtime": "nodejs",
+      "regions": ["fra1", "cdg1", "arn1"]
+    }
+  }
+}
