@@ -2,7 +2,10 @@
 // Важно: в этом репо установи @types/node и в tsconfig добавь "types": ["node"]
 // Или в этом файле добавь: import { Buffer } from 'node:buffer';
 
-export const config = { runtime: "nodejs20.x" };
+export const config = {
+  runtime: "nodejs20.x",
+  regions: ["fra1", "cdg1", "arn1"],
+};
 
 function normalizeBase(input?: string): string {
   if (!input) return "";
@@ -151,16 +154,14 @@ export default async function handler(req: any, res: any) {
       // Успех: 200 и HTML, не «verifying»
       if (r.ok && ct.includes("text/html") && !isVerificationPage(snippet)) {
         if (debug === "1") {
-          return res
-            .status(200)
-            .json({
-              ok: true,
-              base,
-              status: r.status,
-              contentType: ct,
-              target,
-              snippet: snippet.slice(0, 500),
-            });
+          return res.status(200).json({
+            ok: true,
+            base,
+            status: r.status,
+            contentType: ct,
+            target,
+            snippet: snippet.slice(0, 500),
+          });
         }
         res.status(r.status);
         res.setHeader("content-type", ct);
